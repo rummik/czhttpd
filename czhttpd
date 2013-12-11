@@ -185,7 +185,7 @@ function http_listen() {
 }
 
 function parse_request() {
-    read -t $HTTP_TIMEOUT -r -u $fd line || return 1
+    read -t $HTTP_TIMEOUT -r -u $1 line || return 1
     for method url version in ${(s. .)line%$'\r'}; do
         header[method]="$method"
         header[url]="${url%\?*}"
@@ -193,7 +193,7 @@ function parse_request() {
         header[version]="$version"
     done
 
-    while read -r -u $fd line; do
+    while read -r -u $1 line; do
         [[ -n $line && $line != $'\r' ]] || break
         for key value in ${(s/: /)line%$'\r'}; do
             header[${(L)key}]="$value"
@@ -378,6 +378,7 @@ function send_file() {
 function send_chunk() {
     if [[ $header[method] != "HEAD" ]]; then
         for i in {1..$#}; do
+            # We use expr rather than ${#foo} to account for unicode characters
             printf '%x\r\n' "$(expr "x$@[$i]" : '.*' - 1)"
             printf '%s\r\n' "$@[$i]"
         done
@@ -488,23 +489,13 @@ function srv() {
 }
 
 function cleanup() {
-    for i in ${(SM)jobstates##<->}; do
-        kill $i 2>/dev/null
-    done
-
     logger "> Exiting main"
-    exec {logfd}>&-; exec {fifofd}>&-
-    rm $FIFO; ztcp -c
-}
-
-function TRAPCHLD() {
-    while read -t 0 -u $fifofd line; do
-        logger "exiting fork $line"
-    done
+    exec {logfd}>&-
+    ztcp -c
 }
 
 # Main
-trap "cleanup; exit" INT KILL TERM
+trap "cleanup; exit" INT KILL TERM EXIT
 
 parse_args $*
 logger "MAX_CONNECTIONS: $MAX_CONNECTIONS"
@@ -514,43 +505,53 @@ logger "INDEX_FILE: $INDEX_FILE"
 logger "CGI_EXTENSIONS: ${CGI_EXTS:-"N/A"}"
 logger "HIDDEN_FILES: $options[globdots]"
 
-http_listen
+typeset -a fd
+typeset -A assoc
 
-mkfifo $FIFO 2>/dev/null || error "Can not create $FIFO"
-exec {fifofd}<>$FIFO
+ztcp -l $PORT 2>/dev/null || error "Could not bind to port $PORT"
+print "Listening on $PORT"
+listenfd=$REPLY
+
+trap '' PIPE 
+fd+=$listenfd
 
 while :; do
-    while (( ${#jobstates} >= $MAX_CONNECTIONS )); do
-        logger "max connections hit, temporarily unable to fork"
-        zselect -r $fifofd && break
+    print "fd currently is set as $fd"
+    unset assoc; typeset -A assoc
+    if ! zselect -e -r $fd[@] -A assoc; then
+        print "Error, exiting"
+        cleanup
+        exit
+    fi
+
+    for i in ${(k)assoc}; do
+        print "Enterered array with i $i and assoc ${(k)assoc}"
+        if [[ $assoc[$i] == "r" ]]; then
+            if [[ $i == "$listenfd" ]]; then
+                ztcp -a $listenfd
+                fd+=$REPLY
+            else
+                ztcp -L
+                print "trying to read buffer from $i"
+                sysread -t 0 -i $i hg
+                if [[ $? == 5 ]]; then
+                    print "We should close this $i"
+                    ztcp -c $i
+                    fd=(${fd#$i})
+                    continue
+                fi
+                unset header && typeset -A header
+                print "parsing request"
+                parse_request 0 <<< $hg
+
+                srv >&$i 2>/dev/null
+            fi
+        elif [[ $assoc[$i] == "e" ]]; then
+            print "$i should be closed due to e flag"
+            ztcp -c $i
+            fd=(${fd#$i})
+        else
+            print "$i has status $assoc[$i]"
+        fi
     done
-
-    ztcp -a $listenfd
-
-    ( trap "ztcp -c; exit" KILL TERM; trap '' PIPE
-
-    fd=$REPLY
-
-    ztcp_sess=$(ztcp -L)
-    while read line; do
-        [[ $line[3] == "I" ]] && { client_ip=${line[(ws. .)3]}; break }
-    done <<< $ztcp_sess
-
-    while :; do
-        unset header && typeset -A header
-        parse_request
-
-        [[ -z $header ]] && { logger_child "empty request, closing"; RC=113 && break }
-
-        srv >&$fd 2>/dev/null || { logger_child "broken socket, closing"; RC=113 && break }
-
-        [[ $header[Connection] == "close" ]] && { logger_child "connection type: close, closing"; break }
-    done
-
-    ztcp -c
-
-    # Mimic exit status since zsh does not have a posix compatible 'wait'
-    print "$sysparams[pid]: ${RC:-0}" ) >&$fifofd &
-
-    ztcp -c $REPLY
 done
