@@ -519,7 +519,7 @@ while :; do
     print "fd currently is set as $fd"
     unset assoc; typeset -A assoc
     if ! zselect -e -r $fd[@] -A assoc; then
-        print "Error, exiting"
+        print "Error, exiting with fd's $fd[@]"
         cleanup
         exit
     fi
@@ -528,23 +528,27 @@ while :; do
         print "Enterered array with i $i and assoc ${(k)assoc}"
         if [[ $assoc[$i] == "r" ]]; then
             if [[ $i == "$listenfd" ]]; then
-                ztcp -a $listenfd
-                fd+=$REPLY
-            else
-                ztcp -L
-                print "trying to read buffer from $i"
-                sysread -t 0 -i $i hg
-                if [[ $? == 5 ]]; then
-                    print "We should close this $i"
-                    ztcp -c $i
-                    fd=(${fd#$i})
+                if (( ${#fd} < 15 )); then
+                    ztcp -a $listenfd
+                    fd+=$REPLY
+                else
                     continue
                 fi
+            else
+        #        print "trying to read buffer from $i"
+                #sysread -t 0 -i $i hg
+                #if [[ $? == 5 ]]; then
+        #            print "We should close this $i"
+                #    ztcp -c $i
+                #    fd=(${fd#$i})
+                #    continue
+                #fi
                 unset header && typeset -A header
-                print "parsing request"
-                parse_request 0 <<< $hg
+        #        print "parsing request"
+                #parse_request 0 <<< $hg
+                parse_request $i
 
-                srv >&$i 2>/dev/null
+                srv >&$i 2>/dev/null &
             fi
         elif [[ $assoc[$i] == "e" ]]; then
             print "$i should be closed due to e flag"

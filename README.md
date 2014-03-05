@@ -1,3 +1,6 @@
-# czhttpd - Dev Branch
+# czhttpd - dev branch
 
-Partial rewrite, work in progress a.k.a. nothing to see here....*yet*
+Partial rewrite to test out a pseudo event driven model.
+
+TODO:
+- [ ] Implement some sort of timeout
